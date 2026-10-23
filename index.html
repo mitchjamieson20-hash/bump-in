@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bump In</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one-screen game. Blacked-out venue, call-sheet mono HUD, gaffer-tape amber as the single accent. */
+:root{
+  --bg:#0d0f14;
+  --panel:#161a22;
+  --line:#2a303c;
+  --fg:#e9e6df;
+  --muted:#8d93a0;
+  --tape:#f2b233;
+  --cue:#55c7d9;
+  --stop:#ef5b4c;
+  --display:"Archivo Black","Arial Black",Impact,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+html,body{height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--mono);
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:16px;box-sizing:border-box;
+  display:flex;flex-direction:column;align-items:center;gap:12px;
+  -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+header{width:100%;max-width:960px;display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+h1{font-family:var(--display);font-weight:400;font-size:clamp(28px,5vw,44px);letter-spacing:.01em;margin:0;line-height:1;text-wrap:balance}
+h1 span{color:var(--tape)}
+.sub{color:var(--muted);font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+.stage{position:relative;width:100%;max-width:960px;border:1px solid var(--line);border-radius:4px;overflow:hidden;background:#000;touch-action:none}
+canvas{display:block;width:100%;height:auto}
+.overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;text-align:center;
+  background:rgba(8,10,14,.72);padding:16px}
+.overlay h2{font-family:var(--display);font-weight:400;font-size:clamp(24px,5vw,40px);margin:0;line-height:1.05;text-wrap:balance}
+.overlay p{margin:0;color:var(--muted);font-size:13px;max-width:44ch;line-height:1.5}
+.overlay .big{color:var(--fg);font-size:15px}
+.go{font-family:var(--display);font-size:18px;letter-spacing:.04em;background:var(--tape);color:#1a1405;border:0;border-radius:3px;padding:12px 26px;cursor:pointer;margin-top:6px}
+.go:focus-visible,.pad button:focus-visible{outline:2px solid var(--cue);outline-offset:3px}
+.pad{width:100%;max-width:960px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.pad button{font-family:var(--mono);font-weight:600;font-size:15px;letter-spacing:.1em;text-transform:uppercase;
+  background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:16px 8px;cursor:pointer;touch-action:none}
+.pad button.on{border-color:var(--tape);color:var(--tape)}
+.keys{color:var(--muted);font-size:12px;width:100%;max-width:960px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+kbd{font-family:var(--mono);border:1px solid var(--line);border-bottom-width:2px;border-radius:3px;padding:0 5px;color:var(--fg)}
+@media (prefers-reduced-motion:reduce){.go{transition:none}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Bump <span>In</span></h1>
+  <div class="sub">Doors open in 90 seconds. Get to the stage.</div>
+</header>
+
+<div class="stage" id="stage">
+  <canvas id="c" aria-label="Bump In game"></canvas>
+  <div class="overlay" id="ov">
+    <h2 id="ovTitle">Clear the floor before doors</h2>
+    <p id="ovText">Jump the road cases and cable ramps. Duck the flown truss. Grab gaffer tape on the way. Survive until doors open.</p>
+    <p class="big" id="ovScore" hidden></p>
+    <button class="go" id="go">Start the bump-in</button>
+  </div>
+</div>
+
+<div class="pad">
+  <button id="bJump" type="button">Jump</button>
+  <button id="bDuck" type="button">Duck</button>
+</div>
+<div class="keys">
+  <span><kbd>Space</kbd> / <kbd>↑</kbd> jump · <kbd>↓</kbd> duck · tap the stage to jump</span>
+  <span id="best">Best: —</span>
+</div>
+
+<script>
+(function(){
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const ov=document.getElementById('ov'),ovTitle=document.getElementById('ovTitle'),ovText=document.getElementById('ovText'),ovScore=document.getElementById('ovScore'),goBtn=document.getElementById('go');
+const bestEl=document.getElementById('best');
+const H=360,GROUND=296,DOORS=90;
+let W=640,dpr=1;
+const C={tape:'#f2b233',cue:'#55c7d9',stop:'#ef5b4c',fg:'#e9e6df',muted:'#8d93a0'};
+
+let best=0;
+try{best=+localStorage.getItem('bumpin-best')||0}catch(e){}
+function showBest(){bestEl.textContent='Best: '+(best?best.toLocaleString():'—')}
+showBest();
+
+function resize(){
+  const r=cv.parentElement.getBoundingClientRect();
+  const aspect=Math.min(Math.max(r.width/ (r.width<600?300:360),1.4),2.7);
+  W=Math.round(H*aspect);
+  dpr=Math.min(window.devicePixelRatio||1,2);
+  cv.width=W*dpr;cv.height=H*dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  if(state!=='play')draw();
+}
+
+// ---- game state
+let state='menu',p,obs,tapes,t,speed,dist,tapeCount,nextGap,last=0,ducking=false,shake=0,flash=0,popups;
+function reset(){
+  p={x:90,y:GROUND,vy:0,w:26,h:52,ground:true,step:0};
+  obs=[];tapes=[];popups=[];t=0;speed=330;dist=0;tapeCount=0;nextGap=420;shake=0;flash=0;
+}
+reset();
+
+const TYPES=[
+  {k:'case',w:46,h:40,weight:4},
+  {k:'stack',w:46,h:72,weight:2},
+  {k:'ramp',w:76,h:14,weight:2},
+  {k:'truss',w:96,h:22,weight:3}
+];
+function pick(){
+  const pool=TYPES.filter(o=>!(o.k==='stack'&&t<12)&&!(o.k==='truss'&&t<6));
+  let s=pool.reduce((a,o)=>a+o.weight,0),r=Math.random()*s;
+  for(const o of pool){if((r-=o.weight)<=0)return o}return pool[0];
+}
+function spawn(){
+  const o=pick();
+  const ob={k:o.k,x:W+20,w:o.w,h:o.h};
+  ob.y = o.k==='truss' ? GROUND-40-o.h : GROUND-o.h;
+  obs.push(ob);
+  if(Math.random()<.55){
+    const high=o.k!=='truss'&&Math.random()<.6;
+    tapes.push({x:ob.x+ob.w/2+(high?0:140),y:high?GROUND-o.h-46:GROUND-22,r:9,spin:0});
+  }
+  const sp=speed/330;
+  nextGap=(260+Math.random()*260)*Math.max(sp*.85,1);
+}
+
+function jump(){
+  if(state!=='play'){if(state==='menu'||state==='over'||state==='win')start();return}
+  if(p.ground){p.vy=-780;p.ground=false}
+}
+function release(){if(p&&p.vy<-340)p.vy=-340}
+
+function start(){reset();state='play';ov.hidden=true;last=performance.now();requestAnimationFrame(loop)}
+function end(win){
+  state=win?'win':'over';
+  const score=Math.round(dist/10)+tapeCount*50+(win?1000:0);
+  const isBest=score>best;
+  if(isBest){best=score;try{localStorage.setItem('bumpin-best',best)}catch(e){}showBest()}
+  ovTitle.textContent=win?'Doors open. Show’s in.':'Show stop.';
+  ovText.textContent=win
+    ?'Floor’s clear, stage is set, and nobody’s on the incident report. Nice work.'
+    :(t<20?'Early one. Walk the floor, find your sightlines, go again.':'You made it '+fmtLeft(DOORS-t)+' from doors. So close.');
+  ovScore.hidden=false;
+  ovScore.textContent=score.toLocaleString()+' pts · '+tapeCount+' rolls of tape'+(isBest?' · new best':'');
+  goBtn.textContent=win?'Run the next show':'Reset and go again';
+  ov.hidden=false;goBtn.focus({preventScroll:true});
+}
+function fmtLeft(s){s=Math.max(0,Math.ceil(s));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')}
+
+function hit(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y}
+
+function update(dt){
+  t+=dt;
+  speed=330+Math.min(t*3.6,300);
+  dist+=speed*dt;
+  // player
+  const target=ducking&&p.ground?30:52;
+  p.h+= (target-p.h)*Math.min(1,dt*25);
+  if(!p.ground){p.vy+=2300*dt;p.y+=p.vy*dt;if(ducking)p.vy+=1800*dt}
+  if(p.y>=GROUND){p.y=GROUND;p.vy=0;p.ground=true}
+  p.step+=dt*speed/40;
+  // spawn
+  nextGap-=speed*dt;
+  if(nextGap<=0&&t<DOORS-2.5)spawn();
+  for(const o of obs)o.x-=speed*dt;
+  for(const k of tapes){k.x-=speed*dt;k.spin+=dt*6}
+  obs=obs.filter(o=>o.x+o.w>-20);
+  tapes=tapes.filter(k=>k.x>-20&&!k.got);
+  for(const q of popups){q.y-=40*dt;q.life-=dt}
+  popups=popups.filter(q=>q.life>0);
+  // collisions
+  const box={x:p.x+4,y:p.y-p.h+3,w:p.w-8,h:p.h-5};
+  for(const o of obs){
+    const ob=o.k==='ramp'?{x:o.x+10,y:o.y+2,w:o.w-20,h:o.h}:{x:o.x+3,y:o.y+2,w:o.w-6,h:o.h-2};
+    if(hit(box,ob)){shake=.35;flash=.25;draw();end(false);return}
+  }
+  for(const k of tapes){
+    if(hit(box,{x:k.x-k.r,y:k.y-k.r,w:k.r*2,h:k.r*2})){k.got=true;tapeCount++;popups.push({x:k.x,y:k.y-14,life:.7})}
+  }
+  if(t>=DOORS){end(true)}
+}
+
+// ---- drawing
+let lightPhase=0;
+function draw(){
+  ctx.save();
+  if(shake>0){ctx.translate((Math.random()-.5)*8,(Math.random()-.5)*6)}
+  // back wall
+  const g=ctx.createLinearGradient(0,0,0,GROUND);
+  g.addColorStop(0,'#07080c');g.addColorStop(1,'#141822');
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+  const off=dist||0;
+  // lighting beams from the rig
+  lightPhase+=0.004;
+  ctx.globalCompositeOperation='lighter';
+  for(let i=0;i<5;i++){
+    const bx=((i*230-off*.08)%(W+230)+W+230)%(W+230)-115;
+    const sway=Math.sin(lightPhase*3+i*1.7)*90;
+    const col=i%2?'rgba(85,199,217,0.07)':'rgba(242,178,51,0.06)';
+    ctx.fillStyle=col;ctx.beginPath();
+    ctx.moveTo(bx,40);ctx.lineTo(bx+sway-70,GROUND);ctx.lineTo(bx+sway+70,GROUND);ctx.closePath();ctx.fill();
+  }
+  ctx.globalCompositeOperation='source-over';
+  // flown rig
+  ctx.strokeStyle='#2c3240';ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(0,40);ctx.lineTo(W,40);ctx.moveTo(0,52);ctx.lineTo(W,52);ctx.stroke();
+  const ro=((-off*.08)%24+24)%24;
+  ctx.beginPath();for(let x=ro-24;x<W;x+=24){ctx.moveTo(x,40);ctx.lineTo(x+12,52);ctx.lineTo(x+24,40)}ctx.stroke();
+  for(let i=0;i<5;i++){
+    const bx=((i*230-off*.08)%(W+230)+W+230)%(W+230)-115;
+    ctx.fillStyle='#232835';ctx.fillRect(bx-7,52,14,12);
+    ctx.fillStyle=i%2?C.cue:C.tape;ctx.globalAlpha=.8;ctx.fillRect(bx-4,62,8,3);ctx.globalAlpha=1;
+  }
+  // seating silhouettes
+  ctx.fillStyle='#10131b';
+  const so=((-off*.25)%38+38)%38;
+  for(let row=0;row<3;row++){
+    const y=GROUND-70+row*18;
+    for(let x=so-38+row*12;x<W+38;x+=38){ctx.beginPath();ctx.roundRect?ctx.roundRect(x,y,26,16,4):ctx.rect(x,y,26,16);ctx.fill()}
+  }
+  // floor
+  ctx.fillStyle='#1b1f29';ctx.fillRect(0,GROUND,W,H-GROUND);
+  ctx.fillStyle='#232836';ctx.fillRect(0,GROUND,W,3);
+  // spike marks on the floor
+  const fo=((-off)%120+120)%120;
+  ctx.fillStyle=C.tape;ctx.globalAlpha=.55;
+  for(let x=fo-120;x<W;x+=120){ctx.fillRect(x,GROUND+18,16,3);ctx.fillRect(x+6,GROUND+12,3,15)}
+  ctx.globalAlpha=1;
+  ctx.fillStyle='#2a3040';
+  const fo2=((-off)%60+60)%60;
+  for(let x=fo2-60;x<W;x+=60)ctx.fillRect(x,GROUND+44,30,2);
+
+  // obstacles
+  for(const o of obs)drawObs(o);
+  // tape
+  for(const k of tapes){
+    ctx.save();ctx.translate(k.x,k.y);
+    const sx=Math.abs(Math.cos(k.spin))*.6+.4;ctx.scale(sx,1);
+    ctx.fillStyle=C.tape;ctx.beginPath();ctx.arc(0,0,k.r,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#1b1f29';ctx.beginPath();ctx.arc(0,0,k.r*.45,0,Math.PI*2);ctx.fill();
+    ctx.restore();
+  }
+  drawCrew();
+  for(const q of popups){ctx.globalAlpha=Math.min(1,q.life*2);ctx.fillStyle=C.tape;ctx.font='600 13px "IBM Plex Mono",monospace';ctx.textAlign='center';ctx.fillText('+50',q.x,q.y);ctx.globalAlpha=1}
+  if(flash>0){ctx.fillStyle='rgba(239,91,76,'+(flash*1.6)+')';ctx.fillRect(0,0,W,H)}
+  ctx.restore();
+  drawHUD();
+}
+
+function drawObs(o){
+  if(o.k==='case'||o.k==='stack'){
+    const n=o.k==='stack'?2:1,hh=o.h/n;
+    for(let i=0;i<n;i++){
+      const y=o.y+i*hh;
+      ctx.fillStyle='#2b2f38';ctx.fillRect(o.x,y,o.w,hh-1);
+      ctx.strokeStyle='#5c6372';ctx.lineWidth=2;ctx.strokeRect(o.x+1,y+1,o.w-2,hh-3);
+      ctx.fillStyle='#8a92a3';
+      ctx.fillRect(o.x,y,5,5);ctx.fillRect(o.x+o.w-5,y,5,5);ctx.fillRect(o.x,y+hh-6,5,5);ctx.fillRect(o.x+o.w-5,y+hh-6,5,5);
+      ctx.fillStyle='#e9e6df';ctx.globalAlpha=.75;ctx.fillRect(o.x+10,y+hh/2-5,o.w-20,8);ctx.globalAlpha=1;
+      ctx.fillStyle='#1b1f29';ctx.font='600 7px "IBM Plex Mono",monospace';ctx.textAlign='center';
+      ctx.fillText(i?'AUDIO':'LX',o.x+o.w/2,y+hh/2+1.5);
+    }
+  }else if(o.k==='ramp'){
+    ctx.fillStyle='#e0b02c';
+    ctx.beginPath();ctx.moveTo(o.x,o.y+o.h);ctx.lineTo(o.x+14,o.y);ctx.lineTo(o.x+o.w-14,o.y);ctx.lineTo(o.x+o.w,o.y+o.h);ctx.closePath();ctx.fill();
+    ctx.fillStyle='#1b1f29';
+    for(let x=o.x+18;x<o.x+o.w-18;x+=10)ctx.fillRect(x,o.y+3,5,o.h-6);
+  }else if(o.k==='truss'){
+    // chain motors up to the rig
+    ctx.strokeStyle='#4a5162';ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(o.x+12,52);ctx.lineTo(o.x+12,o.y);ctx.moveTo(o.x+o.w-12,52);ctx.lineTo(o.x+o.w-12,o.y);ctx.stroke();
+    ctx.strokeStyle='#b8bfcc';ctx.lineWidth=2;
+    ctx.strokeRect(o.x,o.y,o.w,o.h);
+    ctx.beginPath();
+    for(let x=o.x;x<o.x+o.w;x+=12){ctx.moveTo(x,o.y+o.h);ctx.lineTo(x+6,o.y);ctx.lineTo(x+12,o.y+o.h)}
+    ctx.stroke();
+    ctx.fillStyle=C.cue;ctx.fillRect(o.x+o.w/2-6,o.y+o.h,12,6);
+  }
+}
+
+function drawCrew(){
+  const x=p.x,y=p.y,h=p.h,w=p.w;
+  const run=p.ground?Math.sin(p.step):0;
+  // shadow
+  ctx.fillStyle='rgba(0,0,0,.45)';ctx.beginPath();ctx.ellipse(x+w/2,GROUND+2,14,3,0,0,Math.PI*2);ctx.fill();
+  const legH=Math.min(18,h*.35);
+  // legs
+  ctx.fillStyle='#0a0b0f';
+  ctx.save();ctx.translate(x+9,y-legH);ctx.rotate(run*.5);ctx.fillRect(-3,0,7,legH);ctx.restore();
+  ctx.save();ctx.translate(x+17,y-legH);ctx.rotate(-run*.5);ctx.fillRect(-3,0,7,legH);ctx.restore();
+  // body in blacks with hi-vis strip
+  const bodyTop=y-h+12,bodyH=h-12-legH+2;
+  ctx.fillStyle='#14161c';ctx.fillRect(x+2,bodyTop,w-4,bodyH);
+  ctx.fillStyle=C.tape;ctx.fillRect(x+2,bodyTop+bodyH*.45,w-4,3);
+  // lanyard
+  ctx.strokeStyle=C.cue;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(x+8,bodyTop);ctx.lineTo(x+13,bodyTop+8);ctx.lineTo(x+18,bodyTop);ctx.stroke();
+  ctx.fillStyle='#e9e6df';ctx.fillRect(x+10,bodyTop+8,6,5);
+  // head + cap + headset
+  ctx.fillStyle='#d9a988';ctx.beginPath();ctx.arc(x+w/2+2,y-h+6,7,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#14161c';ctx.fillRect(x+w/2-5,y-h-2,14,5);ctx.fillRect(x+w/2+6,y-h+1,6,2);
+  ctx.strokeStyle='#3a404d';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(x+w/2+6,y-h+8);ctx.lineTo(x+w/2+11,y-h+11);ctx.stroke();
+  // arm with radio
+  ctx.fillStyle='#14161c';ctx.save();ctx.translate(x+w-4,bodyTop+3);ctx.rotate(-run*.6+.3);ctx.fillRect(-2,0,5,14);ctx.fillStyle='#2b2f38';ctx.fillRect(-2,12,6,5);ctx.restore();
+}
+
+function drawHUD(){
+  const left=DOORS-t;
+  ctx.font='600 11px "IBM Plex Mono",monospace';ctx.textAlign='left';ctx.fillStyle=C.muted;
+  ctx.fillText('DOORS IN',16,24);
+  ctx.font='400 26px "Archivo Black","Arial Black",sans-serif';
+  ctx.fillStyle=left<15?C.stop:C.fg;
+  ctx.fillText(fmtLeft(left),16,52);
+  ctx.textAlign='right';ctx.font='600 11px "IBM Plex Mono",monospace';ctx.fillStyle=C.muted;
+  ctx.fillText('SCORE',W-16,24);
+  ctx.font='400 26px "Archivo Black","Arial Black",sans-serif';ctx.fillStyle=C.fg;
+  ctx.fillText((Math.round(dist/10)+tapeCount*50).toLocaleString(),W-16,52);
+  ctx.font='600 11px "IBM Plex Mono",monospace';ctx.fillStyle=C.tape;
+  ctx.fillText('TAPE ×'+tapeCount,W-16,70);
+  // progress to doors along the bottom
+  ctx.fillStyle='#232836';ctx.fillRect(0,H-4,W,4);
+  ctx.fillStyle=C.tape;ctx.fillRect(0,H-4,W*Math.min(1,t/DOORS),4);
+}
+
+function loop(now){
+  if(state!=='play'){ // let the crash shake play out
+    if(shake>0||flash>0){const dt=Math.min(.05,(now-last)/1000);last=now;shake=Math.max(0,shake-dt);flash=Math.max(0,flash-dt);draw();requestAnimationFrame(loop)}
+    return;
+  }
+  const dt=Math.min(.033,(now-last)/1000);last=now;
+  update(dt);
+  if(state==='play'){draw();requestAnimationFrame(loop)}
+  else requestAnimationFrame(loop);
+}
+
+// ---- input
+const bJump=document.getElementById('bJump'),bDuck=document.getElementById('bDuck');
+function duckOn(){ducking=true;bDuck.classList.add('on')}
+function duckOff(){ducking=false;bDuck.classList.remove('on')}
+addEventListener('keydown',e=>{
+  if(e.repeat)return;
+  if(e.code==='Space'||e.code==='ArrowUp'||e.code==='KeyW'){e.preventDefault();if(document.activeElement===goBtn&&state!=='play')return;jump();bJump.classList.add('on')}
+  if(e.code==='ArrowDown'||e.code==='KeyS'){e.preventDefault();duckOn()}
+});
+addEventListener('keyup',e=>{
+  if(e.code==='Space'||e.code==='ArrowUp'||e.code==='KeyW'){release();bJump.classList.remove('on')}
+  if(e.code==='ArrowDown'||e.code==='KeyS')duckOff();
+});
+cv.addEventListener('pointerdown',e=>{e.preventDefault();jump()});
+cv.addEventListener('pointerup',release);
+bJump.addEventListener('pointerdown',e=>{e.preventDefault();jump();bJump.classList.add('on')});
+bJump.addEventListener('pointerup',()=>{release();bJump.classList.remove('on')});
+bJump.addEventListener('pointerleave',()=>bJump.classList.remove('on'));
+bDuck.addEventListener('pointerdown',e=>{e.preventDefault();duckOn()});
+['pointerup','pointerleave','pointercancel'].forEach(ev=>bDuck.addEventListener(ev,duckOff));
+goBtn.addEventListener('click',start);
+addEventListener('blur',()=>{duckOff()});
+
+window.claude?.hot?.snapshot?.(()=>({best}));
+addEventListener('resize',resize);
+resize();
+document.fonts&&document.fonts.ready.then(()=>{if(state!=='play')draw()});
+})();
+</script>
+</body>
+</html>
